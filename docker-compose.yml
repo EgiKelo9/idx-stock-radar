@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  database:
+    image: timescale/timescaledb:latest-pg16
+    container_name: idx_timescale_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-idxpassword}
+      POSTGRES_DB: ${DB_NAME:-idx_market_db}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-idx_market_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scanner_service:
+    build: .
+    container_name: idx_scanner_engine
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    env_file:
+      - .env
+    command: python scheduler.py
+
+volumes:
+  pgdata:

@@ -1,0 +1,65 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+*.env
+
+# Runtime buffers, state & logs
+signal_buffer.json
+*.log
+logs/
+
+# Raw API scrape dumps & temporary caches
+ticker_list_response.txt
+*_response.txt
+*.dump
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing, Coverage & Linters
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+
+# Database volumes (Docker TimescaleDB / SQLite)
+pgdata/
+*.sqlite3
+*.db
+
+# IDE & Editor configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
