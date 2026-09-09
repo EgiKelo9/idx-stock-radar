@@ -79,16 +79,21 @@ class LLMSentimentAnalyzer:
                 },
             ],
             "temperature": 0.1,
-            "max_tokens": 150,
+            "max_tokens": 300,
         }
 
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(url, headers=headers, json=payload)
             if resp.status_code == 200:
-                raw_text = resp.json()["choices"][0]["message"]["content"]
-                parsed = self._parse_json_content(raw_text)
-                if parsed:
-                    return SentimentResult(**parsed)
+                data = resp.json()
+                choices = data.get("choices", [])
+                if choices and len(choices) > 0:
+                    raw_text = choices[0].get("message", {}).get("content", "")
+                    parsed = self._parse_json_content(raw_text)
+                    if parsed:
+                        return SentimentResult(**parsed)
+                else:
+                    logger.warning(f"OpenRouter response missing choices: {data}")
             else:
                 logger.error(f"OpenRouter API error {resp.status_code}: {resp.text}")
         return None
@@ -115,7 +120,7 @@ class LLMSentimentAnalyzer:
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.1,
-            "max_tokens": 150,  # Enforced per  6.2
+            "max_tokens": 300,  # Enforced per  6.2
         }
 
         with httpx.Client(timeout=self.timeout) as client:
@@ -146,7 +151,7 @@ class LLMSentimentAnalyzer:
             "model": self.model if "claude" in self.model else "claude-3-5-haiku-20241022",
             "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 150,
+            "max_tokens": 300,
             "temperature": 0.1,
         }
 

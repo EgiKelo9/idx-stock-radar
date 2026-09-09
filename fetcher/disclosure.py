@@ -1,5 +1,6 @@
 from typing import Optional
 import json
+import shutil
 import subprocess
 import requests
 from utils.logger import get_logger
@@ -26,23 +27,28 @@ class DisclosureFetcher:
         return text
 
     def _fetch_url(self, url: str) -> Optional[dict]:
-        """Attempts fetching JSON via requests, falling back to curl.exe if blocked by Cloudflare."""
+        """Attempts fetching JSON via requests, falling back to curl if blocked by Cloudflare."""
         try:
             resp = self.session.get(url, timeout=8)
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 403:
-                logger.debug(f"Direct request got 403, attempting curl.exe fallback for {url}")
+                logger.debug(f"Direct request got 403, attempting curl fallback for {url}")
         except Exception as e:
-            logger.debug(f"Session get failed: {e}, trying curl.exe fallback")
+            logger.debug(f"Session get failed: {e}, trying curl fallback")
+
+        curl_bin = shutil.which("curl") or shutil.which("curl.exe")
+        if not curl_bin:
+            logger.debug("curl binary not found on system; skipping curl fallback.")
+            return None
 
         try:
-            cmd = ["curl.exe", "-s", url, "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
+            cmd = [curl_bin, "-s", url, "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
             res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
             if res.returncode == 0 and res.stdout.strip().startswith("{"):
                 return json.loads(res.stdout)
         except Exception as e:
-            logger.warning(f"curl.exe fallback also failed: {e}")
+            logger.warning(f"curl fallback also failed: {e}")
 
         return None
 

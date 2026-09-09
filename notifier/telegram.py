@@ -31,7 +31,8 @@ class TelegramNotifier:
     @retry_sync(max_attempts=3, delays=(2.0, 4.0, 8.0))
     def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
         """
-        Sends raw text message to configured Telegram chat/channel.
+        Sends message to configured Telegram chat/channel with automatic
+        fallback to plain text if Markdown entity parsing fails.
         """
         if not self.is_configured:
             logger.info("Telegram Bot Token or Chat ID not configured. Message logged to console instead.")
@@ -56,13 +57,25 @@ class TelegramNotifier:
             if resp.status_code == 200:
                 logger.info("Telegram notification successfully dispatched.")
                 return True
+
+            # If Markdown parsing failed, attempt immediate plain-text fallback
+            if resp.status_code == 400 and "can't parse entities" in resp.text:
+                logger.warning(
+                    f"Telegram entity parsing failed ({resp.text}). Retrying without parse_mode (plain text)..."
+                )
+                payload_fallback = dict(payload)
+                payload_fallback.pop("parse_mode", None)
+                retry_resp = client.post(url, json=payload_fallback)
+                if retry_resp.status_code == 200:
+                    logger.info("Telegram notification successfully dispatched via plain text fallback.")
+                    return True
+                else:
+                    logger.error(
+                        f"Telegram plain text fallback failed {retry_resp.status_code}: {retry_resp.text}"
+                    )
+                    return False
             else:
                 logger.error(f"Telegram dispatch failed {resp.status_code}: {resp.text}")
-                # Retry without markdown if parsing failed
-                if "can't parse entities" in resp.text:
-                    payload.pop("parse_mode", None)
-                    retry_resp = client.post(url, json=payload)
-                    return retry_resp.status_code == 200
                 return False
 
     def dispatch_signal(self, signal: SignalPayload) -> bool:
