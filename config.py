@@ -82,14 +82,15 @@ class DatabaseSettings:
 
 @dataclass(frozen=True)
 class LLMSettings:
-    provider: Literal["openai", "anthropic", "openrouter"] = field(
-        default_factory=lambda: os.getenv("LLM_PROVIDER", "openrouter").lower()  # type: ignore
+    provider: Literal["openai", "anthropic", "openrouter", "gemini"] = field(
+        default_factory=lambda: os.getenv("LLM_PROVIDER", "gemini").lower()  # type: ignore
     )
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
-    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"))
-    timeout_seconds: int = field(default_factory=lambda: get_env_int("LLM_TIMEOUT_SECONDS", 10))
+    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gemini-2.0-flash"))
+    timeout_seconds: int = field(default_factory=lambda: get_env_int("LLM_TIMEOUT_SECONDS", 15))
     max_words: int = field(default_factory=lambda: get_env_int("LLM_MAX_WORDS", 500))
 
 

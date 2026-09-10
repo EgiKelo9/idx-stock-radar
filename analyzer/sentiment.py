@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Optional
 import httpx
 from config import config
@@ -33,6 +34,7 @@ class LLMSentimentAnalyzer:
         self.provider = config.llm.provider
         self.model = config.llm.model
         self.timeout = float(config.llm.timeout_seconds)
+        self.gemini_key = config.llm.gemini_api_key
         self.openrouter_key = config.llm.openrouter_api_key
         self.openai_key = config.llm.openai_api_key
         self.anthropic_key = config.llm.anthropic_api_key
@@ -56,8 +58,62 @@ class LLMSentimentAnalyzer:
             logger.warning(f"Failed to parse LLM JSON: {e} | Raw text: {content[:200]}")
             return None
 
+    def _call_gemini(self, ticker: str, text: str) -> Optional[SentimentResult]:
+        """Calls Google Gemini API via google-generativeai SDK."""
+        if not self.gemini_key or self.gemini_key.startswith("your_"):
+            logger.info("Gemini API key not configured, using fallback.")
+            return None
+
+        try:
+            import google.generativeai as genai  # type: ignore
+        except ImportError:
+            logger.error("google-generativeai not installed. Run: pip install google-generativeai>=0.8.0")
+            return None
+
+        try:
+            genai.configure(api_key=self.gemini_key)
+            model_name = self.model if self.model.startswith("gemini") else "gemini-2.0-flash"
+            gemini_model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=SYSTEM_PROMPT,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                    max_output_tokens=300,
+                ),
+            )
+
+            user_prompt = (
+                f"Ticker: {ticker}\n"
+                f"Teks Keterbukaan Informasi:\n{text}\n"
+                f"Kembalikan HANYA JSON valid."
+            )
+
+            response = gemini_model.generate_content(
+                user_prompt,
+                request_options={"timeout": int(self.timeout)},
+            )
+
+            raw_text = response.text
+            parsed = self._parse_json_content(raw_text)
+            if parsed:
+                return SentimentResult(**parsed)
+            else:
+                logger.warning(f"Gemini returned unparseable JSON for {ticker}: {raw_text[:200]}")
+
+        except Exception as e:
+            err_str = str(e)
+            if "quota" in err_str.lower() or "429" in err_str:
+                logger.warning(f"Gemini rate limit hit for {ticker}: {e}")
+            elif "invalid api key" in err_str.lower() or "403" in err_str:
+                logger.error(f"Gemini API key invalid or unauthorized: {e}")
+            else:
+                logger.error(f"Gemini API error for {ticker}: {e}")
+
+        return None
+
     def _call_openrouter(self, ticker: str, text: str) -> Optional[SentimentResult]:
-        """Calls OpenRouter API (OpenAI-compatible) with free tier models."""
+        """Calls OpenRouter API (OpenAI-compatible) — kept as fallback provider."""
         if not self.openrouter_key or self.openrouter_key.startswith("your_"):
             logger.info("OpenRouter API key not configured, using fallback.")
             return None
@@ -94,6 +150,11 @@ class LLMSentimentAnalyzer:
                         return SentimentResult(**parsed)
                 else:
                     logger.warning(f"OpenRouter response missing choices: {data}")
+            elif resp.status_code == 404:
+                logger.warning(f"OpenRouter model unavailable (404) for {ticker}. Model: {self.model}")
+            elif resp.status_code == 429:
+                logger.warning(f"OpenRouter rate limit (429) for {ticker}. Waiting 2s...")
+                time.sleep(2)
             else:
                 logger.error(f"OpenRouter API error {resp.status_code}: {resp.text}")
         return None
@@ -170,6 +231,7 @@ class LLMSentimentAnalyzer:
         """
         Analyzes sentiment of text.
         If text is missing or LLM call fails/times out, returns a neutral fallback.
+        Provider priority: gemini > openai > anthropic > openrouter (based on LLM_PROVIDER setting).
         """
         clean_ticker = ticker.upper().replace(".JK", "")
 
@@ -180,7 +242,9 @@ class LLMSentimentAnalyzer:
             )
 
         try:
-            if self.provider == "anthropic":
+            if self.provider == "gemini":
+                res = self._call_gemini(clean_ticker, text)
+            elif self.provider == "anthropic":
                 res = self._call_anthropic(clean_ticker, text)
             elif self.provider == "openrouter":
                 res = self._call_openrouter(clean_ticker, text)
