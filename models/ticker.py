@@ -10,8 +10,9 @@ BrokerAccumRank = Literal[
     "NEUTRAL",
     "SMALL_DIST",
     "BIG_DIST",
+    "DATA_N/A",
 ]
-ForeignFlowRank = Literal["HIGH_ACCUM", "ACCUM", "NEUTRAL", "DIST", "HIGH_DIST"]
+ForeignFlowRank = Literal["HIGH_ACCUM", "ACCUM", "NEUTRAL", "DIST", "HIGH_DIST", "DATA_N/A"]
 
 
 class Ticker(BaseModel):

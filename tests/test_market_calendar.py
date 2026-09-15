@@ -38,3 +38,22 @@ def test_market_calendar_weekends_and_holidays():
     holiday = datetime(2026, 1, 1, 10, 0)
     assert cal.is_holiday(holiday) is True
     assert cal.get_current_session(holiday) == "CLOSED"
+
+
+def test_is_trading_day_and_previous_day():
+    cal = MarketCalendar()
+
+    # Wednesday is a trading day
+    wed = datetime(2026, 3, 25, 10, 30)
+    assert cal.is_trading_day(wed) is True
+
+    # Sunday is not a trading day
+    sun = datetime(2026, 3, 22, 10, 0)
+    assert cal.is_trading_day(sun) is False
+
+    # Previous trading day from Monday 2026-03-23 should be Friday 2026-03-20
+    mon = datetime(2026, 3, 23, 8, 30)
+    prev = cal.get_previous_trading_day(mon)
+    assert prev.weekday() == 4  # Friday
+    assert prev.day == 20
+

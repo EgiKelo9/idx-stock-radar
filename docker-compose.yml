@@ -26,6 +26,8 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    environment:
+      - DB_HOST=${DOCKER_DB_HOST:-database}
     command: python scheduler.py
 
 volumes:

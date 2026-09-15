@@ -1,4 +1,4 @@
-from datetime import datetime, time, date
+from datetime import datetime, time, date, timedelta
 from functools import lru_cache
 from typing import Optional, Set
 import zoneinfo
@@ -56,6 +56,19 @@ class MarketCalendar:
         """Saturday (5) and Sunday (6) are non-trading days."""
         current = self.get_current_time(dt)
         return current.weekday() >= 5
+
+    def is_trading_day(self, dt: Optional[datetime] = None) -> bool:
+        """Returns True if the date is not a weekend and not a holiday."""
+        current = self.get_current_time(dt)
+        return not self.is_weekend(current) and not self.is_holiday(current)
+
+    def get_previous_trading_day(self, dt: Optional[datetime] = None) -> datetime:
+        """Returns the most recent previous trading day datetime (localized to Jakarta timezone)."""
+        current = self.get_current_time(dt)
+        prev = current - timedelta(days=1)
+        while not self.is_trading_day(prev):
+            prev -= timedelta(days=1)
+        return prev
 
     def get_current_session(self, dt: Optional[datetime] = None) -> str:
         """

@@ -23,11 +23,12 @@ def test_telegram_message_formatting():
         ai_context="Kinerja pertumbuhan kredit mikro stabil di atas rata-rata industri.",
     )
 
+    # Default should format as MID_DAY
     msg = format_signal_message(sig)
 
     # Verify header & ticker info
-    assert "IDX STOCK RADAR - NEW SIGNAL" in msg
-    assert "BBRI (Bank Rakyat Indonesia)" in msg
+    assert "MID-DAY MOMENTUM" in msg
+    assert "*BBRI* (Bank Rakyat Indonesia)" in msg
     assert "PULLBACK\\_REBOUND" in msg
 
     # Verify trading plan
@@ -87,3 +88,42 @@ def test_format_signal_with_problematic_chars():
     assert "\\*risk\\*" in msg
     # Verify closing disclaimer is present
     assert OFFICIAL_OJK_DISCLAIMER in msg
+
+
+def test_contextual_telegram_templates():
+    from models.scan_context import ScanContext
+
+    sig = SignalPayload(
+        ticker="ASII",
+        company_name="Astra International",
+        setup_type="BREAKOUT",
+        parameters=TradingParameters(
+            entry=5100.0,
+            stop_loss=4950.0,
+            take_profit_1=5400.0,
+            take_profit_2=5700.0,
+            rrr=2.0,
+        ),
+        metrics=SignalMetrics(
+            rsi=55.0,
+            volume_multiplier=1.7,
+            foreign_accum_rank="ACCUM",
+            broker_accum_rank="BIG_ACCUM",
+        ),
+        ai_context="Kinerja otomotif membaik.",
+        scan_date="2026-09-15",
+    )
+
+    # Pre-market template
+    msg_pre = format_signal_message(sig, context=ScanContext.PRE_MARKET)
+    assert "🌅 *PRE-MARKET WATCHLIST*" in msg_pre
+    assert "D-1 Closing" in msg_pre
+    assert "RENCANA ENTRY HARI INI" in msg_pre
+    assert "INDIKATOR D-1" in msg_pre
+
+    # End-market template
+    msg_end = format_signal_message(sig, context=ScanContext.END_MARKET)
+    assert "🌙 *SWING WATCHLIST* — Entry Besok" in msg_end
+    assert "EOD Closing Confirmed" in msg_end
+    assert "RENCANA SWING BESOK" in msg_end
+    assert "INDIKATOR EOD HARI INI" in msg_end

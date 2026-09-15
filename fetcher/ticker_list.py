@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from typing import List, Optional, Set
 import requests
@@ -91,18 +92,30 @@ class TickerListFetcher:
                 if data and (data.get("data") or data.get("profiles")):
                     return data
             elif resp.status_code == 403:
-                logger.debug("Direct request got 403, using curl.exe fallback for ticker list")
+                logger.debug("Direct request got 403, attempting curl fallback for ticker list")
         except Exception as e:
-            logger.debug(f"Direct ticker request failed: {e}, attempting curl.exe fallback")
+            logger.debug(f"Direct ticker request failed: {e}, attempting curl fallback")
 
-        # Attempt 2: curl.exe fallback
+        # Attempt 2: curl fallback (cross-platform)
+        curl_bin = shutil.which("curl") or shutil.which("curl.exe")
+        if not curl_bin:
+            logger.debug("curl binary not found on system; skipping curl fallback.")
+            return None
+
         try:
-            cmd = ["curl.exe", "-s", url, "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
+            cmd = [
+                curl_bin,
+                "-s",
+                url,
+                "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+                "-H", "Accept: application/json, text/plain, */*",
+                "-H", "Referer: https://www.idx.co.id/id/perusahaan-tercatat/profil-perusahaan-tercatat",
+            ]
             res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=15)
             if res.returncode == 0 and res.stdout.strip().startswith("{"):
                 return json.loads(res.stdout)
         except Exception as e:
-            logger.warning(f"curl.exe ticker list fetch failed: {e}")
+            logger.warning(f"curl ticker list fetch failed: {e}")
 
         return None
 
@@ -130,6 +143,12 @@ class TickerListFetcher:
                 self._cached_tickers = parsed
                 self._last_fetch_time = now
                 logger.info(f"Loaded {len(parsed)} tickers live from IDX API")
+                # Persist snapshot locally for offline/fallback stability
+                try:
+                    with open(LOCAL_CACHE_PATH, "w", encoding="utf-8") as f:
+                        json.dump(network_data, f)
+                except Exception as e:
+                    logger.debug(f"Could not persist ticker snapshot locally: {e}")
                 return parsed
 
         # 3. Local file cache fallback (ticker_list_response.txt)

@@ -160,3 +160,66 @@ def test_dynamic_market_calendar_multiyear():
     # Weekend check
     assert cal.is_weekend(datetime(2026, 9, 12)) is True  # Saturday
     assert cal.is_weekend(datetime(2026, 9, 9)) is False   # Wednesday
+
+
+def test_ticker_list_curl_fallback_cross_platform():
+    """Validates that TickerListFetcher dynamically resolves curl binary on Linux/Windows and falls back properly."""
+    fetcher = TickerListFetcher()
+
+    # Case 1: requests gets 403, curl is resolved via shutil.which
+    mock_resp = MagicMock()
+    mock_resp.status_code = 403
+
+    mock_curl_proc = MagicMock()
+    mock_curl_proc.returncode = 0
+    mock_curl_proc.stdout = json.dumps({
+        "data": [
+            {"KodeEmiten": "BBCA", "NamaEmiten": "Bank Central Asia", "PapanPencatatan": "Utama", "EfekEmiten_Saham": True, "Status": 0}
+        ]
+    })
+
+    with patch.object(fetcher.session, "get", return_value=mock_resp), \
+        patch("shutil.which", return_value="/usr/bin/curl"), \
+        patch("subprocess.run", return_value=mock_curl_proc) as mock_subproc:
+
+        result = fetcher._fetch_from_network()
+        assert result is not None
+        assert "data" in result
+        assert result["data"][0]["KodeEmiten"] == "BBCA"
+
+        # Ensure curl was invoked with /usr/bin/curl, NOT hardcoded curl.exe
+        called_cmd = mock_subproc.call_args[0][0]
+        assert called_cmd[0] == "/usr/bin/curl"
+        assert "-H" in called_cmd
+        assert any("Referer:" in arg for arg in called_cmd)
+
+
+def test_broker_flow_smart_date_and_data_na_fallback():
+    """Validates that off-hours queries without date resolve to D-1 and return DATA_N/A when empty."""
+    fetcher = BrokerFlowFetcher()
+    cal = fetcher.calendar
+
+    # Mock time at 08:30 WIB on a Tuesday (2026-09-15 08:30 WIB)
+    tz_wib = cal.tz
+    morning_dt = datetime(2026, 9, 15, 8, 30, tzinfo=tz_wib)
+
+    with patch.object(cal, "get_current_time", return_value=morning_dt):
+        effective_date = fetcher._determine_effective_date()
+        # Monday 2026-09-14 should be the settled D-1 date
+        assert effective_date == "20260914"
+
+    # Mock empty response from IDX -> should return DATA_N/A instead of NEUTRAL
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+
+    with patch.object(fetcher.session, "get", return_value=mock_resp):
+        summary = fetcher.fetch_broker_summary("AKRA", reference_date="20260914")
+        assert summary.accum_rank == "DATA_N/A"
+        assert summary.foreign_accum_rank == "DATA_N/A"
+        assert summary.total_volume == 0
+
+        # In-memory cache test: second call should not call session.get again
+        fetcher.session.get.reset_mock()
+        cached_summary = fetcher.fetch_broker_summary("AKRA", reference_date="20260914")
+        assert cached_summary.accum_rank == "DATA_N/A"
+        fetcher.session.get.assert_not_called()

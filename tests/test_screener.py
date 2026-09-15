@@ -118,3 +118,47 @@ def test_layer_3_bandarmologi_classification():
     # Ratio = 80,000 / 200,000 = 0.40 -> BIG_ACCUM
     assert summary.accum_rank == "BIG_ACCUM"
     assert summary.foreign_accum_rank == "HIGH_ACCUM"
+
+
+def test_contextual_screener_rules():
+    from models.scan_context import ScanContext
+
+    # Test 1: MID_DAY volume threshold allows 1.3x
+    passed, mult, _ = check_volume_spike(
+        current_volume=135_000,
+        avg_volume_20d=100_000,
+        current_turnover=2_000_000_000.0,
+        context=ScanContext.MID_DAY,
+    )
+    assert passed is True
+    assert mult == 1.35
+
+    # PRE_MARKET requires >= 1.5x, so 1.35x fails
+    passed_pre, _, reason_pre = check_volume_spike(
+        current_volume=135_000,
+        avg_volume_20d=100_000,
+        current_turnover=2_000_000_000.0,
+        context=ScanContext.PRE_MARKET,
+    )
+    assert passed_pre is False
+    assert "1.5x" in reason_pre
+
+    # Test 2: END_MARKET detects CONTRACTION_SETUP (inside bar, drying volume <= 0.7x, above SMA20)
+    prices = [1000.0 + i * 2 + (5 if i % 2 == 0 else -5) for i in range(60)]
+    closes = prices[:-2] + [1120.0, 1118.0]
+    opens = [p - 1 for p in closes]
+    highs = [p + 8 for p in closes]
+    highs[-1] = 1122.0  # inside bar: high <= prev high (1128)
+    lows = [p - 8 for p in closes]
+    lows[-1] = 1114.0   # inside bar: low >= prev low (1112)
+    vols = [100_000] * 59 + [50_000]  # drying volume 0.5x
+
+    df = pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": closes, "volume": vols})
+    df_ind = calculate_indicators(df)
+
+    setup_end, _ = detect_technical_setup(df_ind, volume_multiplier=0.5, context=ScanContext.END_MARKET)
+    assert setup_end == "CONTRACTION_SETUP"
+
+    # PRE_MARKET should not permit CONTRACTION_SETUP
+    setup_pre, _ = detect_technical_setup(df_ind, volume_multiplier=0.5, context=ScanContext.PRE_MARKET)
+    assert setup_pre is None

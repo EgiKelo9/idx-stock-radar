@@ -9,6 +9,7 @@ SetupType = Literal[
     "PULLBACK_REBOUND",
     "OVERSOLD_BOUNCE",
     "VOLUME_SURGE",
+    "CONTRACTION_SETUP",
 ]
 
 
@@ -38,3 +39,5 @@ class SignalPayload(BaseModel):
     parameters: TradingParameters
     metrics: SignalMetrics
     ai_context: str = Field(..., description="AI sentiment analysis summary or reason")
+    scan_context: str = Field(default="MID_DAY", description="Scan context: PRE_MARKET, MID_DAY, or END_MARKET")
+    scan_date: str = Field(default="", description="Execution date YYYY-MM-DD")

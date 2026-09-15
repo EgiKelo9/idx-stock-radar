@@ -121,6 +121,12 @@ class SystemSettings:
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").upper())
     ticker_boards: str = field(default_factory=lambda: os.getenv("TICKER_BOARDS", "UTAMA,PENGEMBANGAN"))
     ticker_cache_ttl_hours: int = field(default_factory=lambda: get_env_int("TICKER_CACHE_TTL_HOURS", 6))
+    pre_market_hour: int = field(default_factory=lambda: get_env_int("PRE_MARKET_HOUR", 8))
+    pre_market_minute: int = field(default_factory=lambda: get_env_int("PRE_MARKET_MINUTE", 30))
+    mid_day_hour: int = field(default_factory=lambda: get_env_int("MID_DAY_HOUR", 12))
+    mid_day_minute: int = field(default_factory=lambda: get_env_int("MID_DAY_MINUTE", 5))
+    end_market_hour: int = field(default_factory=lambda: get_env_int("END_MARKET_HOUR", 16))
+    end_market_minute: int = field(default_factory=lambda: get_env_int("END_MARKET_MINUTE", 15))
 
 
 @dataclass(frozen=True)

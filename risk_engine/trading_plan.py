@@ -8,7 +8,8 @@ def generate_trading_plan(
     atr: float,
     atr_multiplier: float = 1.5,
     min_rrr: float = 2.0,
-    tp2_multiplier: float = 3.0,
+    tp2_multiplier: float = 3.5,
+    resistance_20d: Optional[float] = None,
 ) -> Tuple[Optional[TradingParameters], str]:
     """
     Constructs a verified trading plan for a buy signal.
@@ -32,12 +33,23 @@ def generate_trading_plan(
     if risk <= 0:
         return None, f"Stop Loss ({sl}) must be strictly below Entry ({entry})"
 
-    # Take Profit 1 target with minimum required RRR (at least 1:2)
-    raw_tp1 = entry + (min_rrr * risk)
+    # Take Profit 1 target:
+    # Prioritize technical resistance (20-day high) if it satisfies minimum RRR
+    if (
+        resistance_20d is not None
+        and resistance_20d > entry
+        and (resistance_20d - entry) / risk >= min_rrr
+    ):
+        raw_tp1 = resistance_20d
+    else:
+        # Fallback to minimum required RRR (at least 1:2)
+        raw_tp1 = entry + (min_rrr * risk)
+
     tp1 = round_to_tick(raw_tp1, mode="ceil")
 
-    # Take Profit 2 target (default 1:3 RRR)
-    raw_tp2 = entry + (tp2_multiplier * risk)
+    # Take Profit 2 target (default 1:3.5 RRR for swing trading)
+    # Ensure raw_tp2 is strictly above TP1 even when TP1 is anchored to high resistance
+    raw_tp2 = max(entry + (tp2_multiplier * risk), tp1 + (1.0 * risk))
     tp2 = round_to_tick(raw_tp2, mode="ceil")
 
     # Recalculate actual realized RRR after tick size rounding
@@ -49,6 +61,11 @@ def generate_trading_plan(
             from risk_engine.tick_size import get_tick_size
             tp1 += get_tick_size(tp1)
         actual_rrr = round((tp1 - entry) / risk, 2)
+
+    # Ensure TP2 is strictly greater than TP1
+    if tp2 <= tp1:
+        from risk_engine.tick_size import get_tick_size
+        tp2 = tp1 + get_tick_size(tp1)
 
     plan = TradingParameters(
         entry=float(entry),

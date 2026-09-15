@@ -78,9 +78,15 @@ class TelegramNotifier:
                 logger.error(f"Telegram dispatch failed {resp.status_code}: {resp.text}")
                 return False
 
-    def dispatch_signal(self, signal: SignalPayload) -> bool:
+    def dispatch_signal(
+        self,
+        signal: SignalPayload,
+        context: Optional[object] = None,
+    ) -> bool:
         """
-        Formats and sends a complete trading signal.
+        Formats and sends a complete trading signal according to scan context.
         """
-        formatted = format_signal_message(signal)
+        from models.scan_context import ScanContext
+        scan_ctx = context if isinstance(context, ScanContext) else None
+        formatted = format_signal_message(signal, context=scan_ctx)
         return self.send_message(formatted, parse_mode="Markdown")

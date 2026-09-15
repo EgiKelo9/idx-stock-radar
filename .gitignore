@@ -10,9 +10,9 @@ signal_buffer.json
 logs/
 
 # Raw API scrape dumps & temporary caches
-ticker_list_response.txt
 *_response.txt
 *.dump
+!ticker_list_response.txt
 
 # Python bytecode & cache
 __pycache__/

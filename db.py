@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS signal_logs (
     volume_ratio NUMERIC(4, 2) NOT NULL,
     sentiment_score NUMERIC(3, 2),
     sentiment_summary TEXT,
-    execution_status VARCHAR(20) DEFAULT 'SENT'
+    execution_status VARCHAR(20) DEFAULT 'SENT',
+    scan_context VARCHAR(20) DEFAULT 'MID_DAY',
+    scan_date VARCHAR(20)
 );
 """
 
@@ -77,6 +79,12 @@ class DatabaseManager:
         try:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
+                # Attempt to add columns to existing table if already created earlier
+                try:
+                    cur.execute("ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS scan_context VARCHAR(20) DEFAULT 'MID_DAY';")
+                    cur.execute("ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS scan_date VARCHAR(20);")
+                except Exception:
+                    pass
                 # Attempt to create Timescale hypertable
                 try:
                     cur.execute("SELECT create_hypertable('market_data', 'time', if_not_exists => TRUE);")
@@ -105,8 +113,9 @@ class DatabaseManager:
                         INSERT INTO signal_logs (
                             id, symbol, entry_price, stop_loss,
                             take_profit_1, take_profit_2, risk_reward_ratio,
-                            volume_ratio, sentiment_score, sentiment_summary, execution_status
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            volume_ratio, sentiment_score, sentiment_summary, execution_status,
+                            scan_context, scan_date
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             signal.signal_id,
@@ -120,11 +129,14 @@ class DatabaseManager:
                             sentiment_score,
                             signal.ai_context,
                             "SENT",
+                            getattr(signal, "scan_context", "MID_DAY"),
+                            getattr(signal, "scan_date", ""),
                         ),
                     )
                 conn.commit()
                 conn.close()
                 return True
+
             except Exception as e:
                 logger.error(f"Failed to write signal to DB: {e}. Falling back to flat-file buffer.")
                 if conn:
