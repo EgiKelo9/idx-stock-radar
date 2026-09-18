@@ -40,17 +40,23 @@ class LLMSentimentAnalyzer:
         self.anthropic_key = config.llm.anthropic_api_key
 
     def _parse_json_content(self, content: str) -> Optional[dict]:
-        """Extracts JSON object from LLM response text, handling possible markdown code blocks."""
+        """Extracts JSON object from LLM response text, handling markdown code blocks and preambles."""
+        if not content:
+            return None
         cleaned = content.strip()
         if "```json" in cleaned:
-            cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+            parts = cleaned.split("```json", 1)[1]
+            cleaned = parts.split("```", 1)[0].strip()
         elif "```" in cleaned:
-            cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+            parts = cleaned.split("```", 1)[1]
+            cleaned = parts.split("```", 1)[0].strip()
 
         start_idx = cleaned.find("{")
         end_idx = cleaned.rfind("}")
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
             cleaned = cleaned[start_idx : end_idx + 1]
+        else:
+            return None
 
         try:
             return json.loads(cleaned)
@@ -59,7 +65,7 @@ class LLMSentimentAnalyzer:
             return None
 
     def _call_gemini(self, ticker: str, text: str) -> Optional[SentimentResult]:
-        """Calls Google Gemini API via google-generativeai SDK."""
+        """Calls Google Gemini API via google-generativeai SDK with defensive part extraction."""
         if not self.gemini_key or self.gemini_key.startswith("your_"):
             logger.info("Gemini API key not configured, using fallback.")
             return None
@@ -94,7 +100,31 @@ class LLMSentimentAnalyzer:
                 request_options={"timeout": int(self.timeout)},
             )
 
-            raw_text = response.text
+            # Defensive extraction: handle candidates finish_reason or blocked parts
+            raw_text = None
+            if hasattr(response, "candidates") and response.candidates:
+                candidate = response.candidates[0]
+                # finish_reason != 1 indicates STOP was not reached (e.g. 2 = SAFETY, 3 = RECITATION)
+                if hasattr(candidate, "finish_reason") and candidate.finish_reason not in (1, None):
+                    logger.warning(
+                        f"Gemini generation flagged/stopped for {ticker} (finish_reason: {candidate.finish_reason})"
+                    )
+                    return None
+                if hasattr(candidate, "content") and hasattr(candidate.content, "parts") and candidate.content.parts:
+                    raw_text = "".join(
+                        getattr(p, "text", "") for p in candidate.content.parts if hasattr(p, "text")
+                    )
+
+            if not raw_text:
+                try:
+                    raw_text = response.text
+                except Exception:
+                    pass
+
+            if not raw_text:
+                logger.warning(f"Gemini returned empty or blocked response parts for {ticker}")
+                return None
+
             parsed = self._parse_json_content(raw_text)
             if parsed:
                 return SentimentResult(**parsed)
@@ -243,6 +273,8 @@ class LLMSentimentAnalyzer:
 
         try:
             if self.provider == "gemini":
+                import time
+                time.sleep(1.0)  # Gentle rate-limit pacing for Gemini API
                 res = self._call_gemini(clean_ticker, text)
             elif self.provider == "anthropic":
                 res = self._call_anthropic(clean_ticker, text)
