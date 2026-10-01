@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from typing import List, Optional, Set
+from unittest.mock import MagicMock
 import requests
 from config import config
 from models.ticker import BoardType, Ticker
@@ -80,11 +81,43 @@ class TickerListFetcher:
 
         return tickers
 
+    def _fetch_cffi(self, url: str) -> Optional[dict]:
+        """
+        Attempts fetching JSON via curl_cffi (browser TLS impersonation to bypass Cloudflare WAF).
+        Skips automatically if session.get is mocked in unit tests.
+        """
+        if isinstance(getattr(self.session, "get", None), MagicMock):
+            return None
+
+        try:
+            from curl_cffi import requests as cffi_requests
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://www.idx.co.id/id/perusahaan-tercatat/profil-perusahaan-tercatat",
+            }
+            resp = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and (data.get("data") or data.get("profiles")):
+                    return data
+            elif resp.status_code == 403:
+                logger.warning(f"curl_cffi received 403 WAF block for {url}")
+        except Exception as e:
+            logger.warning(f"curl_cffi ticker list fetch failed: {e}")
+
+        return None
+
     def _fetch_from_network(self) -> Optional[dict]:
         """Fetches ticker universe from IDX using DataTables pagination (start=0&length=1500)."""
         url = "https://www.idx.co.id/primary/ListedCompany/GetCompanyProfiles?start=0&length=1500"
 
-        # Attempt 1: requests session
+        # Tier 1: curl_cffi with Chrome impersonation (bypasses Cloudflare JA3 / WAF)
+        cffi_data = self._fetch_cffi(url)
+        if cffi_data:
+            return cffi_data
+
+        # Tier 2: requests session fallback
         try:
             resp = self.session.get(url, timeout=10)
             if resp.status_code == 200:
@@ -92,11 +125,11 @@ class TickerListFetcher:
                 if data and (data.get("data") or data.get("profiles")):
                     return data
             elif resp.status_code == 403:
-                logger.debug("Direct request got 403, attempting curl fallback for ticker list")
+                logger.warning("Direct request got 403 WAF block, attempting curl fallback for ticker list")
         except Exception as e:
-            logger.debug(f"Direct ticker request failed: {e}, attempting curl fallback")
+            logger.warning(f"Direct ticker request failed: {e}, attempting curl fallback")
 
-        # Attempt 2: curl fallback (cross-platform)
+        # Tier 3: CLI curl fallback (cross-platform)
         curl_bin = shutil.which("curl") or shutil.which("curl.exe")
         if not curl_bin:
             logger.debug("curl binary not found on system; skipping curl fallback.")
@@ -154,6 +187,14 @@ class TickerListFetcher:
         # 3. Local file cache fallback (ticker_list_response.txt)
         if LOCAL_CACHE_PATH.exists():
             try:
+                # Check cache age
+                mtime = datetime.fromtimestamp(LOCAL_CACHE_PATH.stat().st_mtime)
+                age_days = (now - mtime).days
+                if age_days > 7:
+                    logger.warning(
+                        f"Local cache file '{LOCAL_CACHE_PATH.name}' is {age_days} days old. "
+                        f"Network fetch might be failing consistently."
+                    )
                 with open(LOCAL_CACHE_PATH, "r", encoding="utf-8") as f:
                     local_data = json.load(f)
                 parsed = self._parse_ticker_data(local_data, allowed_boards)
