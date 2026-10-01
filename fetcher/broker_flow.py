@@ -36,7 +36,9 @@ class BrokerFlowFetcher:
     ) -> str:
         """
         Determines the appropriate date for broker summary fetching.
-        Priority: reference_date > target_date > Smart off-hours logic (D-1 before 10:00 WIB or off-trading days).
+        Priority: reference_date > target_date > Smart off-hours logic.
+        IDX trading summary data is only settled/published post-market (~16:30+ WIB).
+        Before 16:30 WIB or on weekends/holidays, always use previous trading day (D-1 settled).
         """
         if reference_date:
             return reference_date
@@ -44,15 +46,15 @@ class BrokerFlowFetcher:
             return target_date
 
         now_wib = self.calendar.get_current_time()
-        # IDX Broker summary is only available intraday after trading starts (~10:00 WIB).
-        # Before 10:00 WIB or on weekends/holidays, use previous trading day (D-1 settled).
-        if now_wib.hour < 10 or not self.calendar.is_trading_day(now_wib):
+        # IDX official summary only publishes after market close (~16:30 WIB).
+        # Before 16:30 WIB, during intraday market sessions, or on non-trading days, use D-1 settled.
+        if now_wib.hour < 16 or (now_wib.hour == 16 and now_wib.minute < 30) or not self.calendar.is_trading_day(now_wib):
             prev_day = self.calendar.get_previous_trading_day(now_wib)
             return prev_day.strftime("%Y%m%d")
 
         return now_wib.strftime("%Y%m%d")
 
-    def _get_json(self, url: str) -> Optional[dict]:
+    def _get_json(self, url: str, custom_headers: Optional[dict] = None) -> Optional[dict]:
         """
         Fetches JSON from URL using curl_cffi with Chrome impersonation to bypass Cloudflare WAF,
         falling back to self.session.get (or prioritizing mock in unit tests).
@@ -67,22 +69,26 @@ class BrokerFlowFetcher:
                 return None
             return None
 
+        req_headers = custom_headers or self.headers
+
         # Tier 1: curl_cffi with browser impersonation (bypasses Cloudflare JA3 / WAF)
         try:
             from curl_cffi import requests as cffi_requests
-            resp = cffi_requests.get(url, headers=self.headers, impersonate="chrome120", timeout=10)
+            resp = cffi_requests.get(url, headers=req_headers, impersonate="chrome120", timeout=10)
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 403:
-                logger.debug(f"curl_cffi received 403 for {url}")
+                logger.warning(f"curl_cffi received 403 WAF block for {url}")
         except Exception as e:
-            logger.debug(f"curl_cffi broker get failed for {url}: {e}")
+            logger.warning(f"curl_cffi broker get failed for {url}: {e}")
 
         # Tier 2: standard requests.Session
         try:
-            resp = self.session.get(url, timeout=8)
+            resp = self.session.get(url, headers=req_headers, timeout=8)
             if resp.status_code == 200:
                 return resp.json()
+            elif resp.status_code == 403:
+                logger.warning(f"session.get received 403 WAF block for {url}")
         except Exception as e:
             logger.debug(f"session.get failed for {url}: {e}")
 
@@ -97,7 +103,9 @@ class BrokerFlowFetcher:
             return self._stock_summary_cache[date_str]
 
         url = f"https://www.idx.co.id/primary/TradingSummary/GetStockSummary?date={date_str}"
-        data = self._get_json(url)
+        headers = dict(self.headers)
+        headers["Referer"] = "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham/"
+        data = self._get_json(url, custom_headers=headers)
 
         records: Dict[str, dict] = {}
         if data and isinstance(data, dict):
@@ -121,6 +129,10 @@ class BrokerFlowFetcher:
         if records:
             logger.info(f"Loaded {len(records)} ticker stock summaries for foreign flow on {date_str}")
             self._stock_summary_cache[date_str] = records
+        else:
+            # Cache empty result to prevent hundreds of duplicate WAF-triggering calls
+            logger.debug(f"Stock summary for {date_str} returned 0 records; caching empty to prevent WAF throttling")
+            self._stock_summary_cache[date_str] = {}
 
         return records
 
@@ -129,11 +141,25 @@ class BrokerFlowFetcher:
         # Check bulk stock summary to obtain authoritative foreign flow
         bulk_data = self.get_stock_summary_bulk(date_str)
         stock_info = bulk_data.get(clean_symbol)
-        foreign_net_val = stock_info["foreign_net_val"] if stock_info else 0.0
+
+        # Fallback to D-1 bulk data if primary bulk data was empty
+        if not bulk_data:
+            try:
+                eff_dt = datetime.strptime(date_str, "%Y%m%d")
+                prev_date = self.calendar.get_previous_trading_day(eff_dt).strftime("%Y%m%d")
+                prev_bulk = self.get_stock_summary_bulk(prev_date)
+                if prev_bulk:
+                    stock_info = prev_bulk.get(clean_symbol)
+            except Exception:
+                pass
+
+        foreign_net_val = stock_info["foreign_net_val"] if stock_info else None
 
         try:
             url = f"https://www.idx.co.id/primary/TradingSummary/GetBrokerSummary?date={date_str}&stockCode={clean_symbol}"
-            data = self._get_json(url)
+            headers = dict(self.headers)
+            headers["Referer"] = "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-broker/"
+            data = self._get_json(url, custom_headers=headers)
 
             if data and isinstance(data, dict):
                 # Format A: buyers/sellers already separated
@@ -165,7 +191,7 @@ class BrokerFlowFetcher:
                             total_volume=total_vol,
                             top_buyers=top_buyers,
                             top_sellers=top_sellers,
-                            foreign_net_buy=foreign_net_val,
+                            foreign_net_buy=foreign_net_val if foreign_net_val is not None else 0.0,
                         )
 
                 # Format B: Official IDX GetBrokerSummary response (flat list of broker records under 'data')
@@ -195,7 +221,7 @@ class BrokerFlowFetcher:
                                 top_sellers = sorted_brokers[3:6] if len(sorted_brokers) > 3 else []
 
                             # If foreign_net_val was not found in bulk data, estimate from foreign brokers
-                            if not stock_info:
+                            if foreign_net_val is None:
                                 foreign_val = sum(b.value for b in sorted_brokers if b.broker_code in FOREIGN_BROKERS)
                                 retail_val = sum(b.value for b in sorted_brokers if b.broker_code in RETAIL_BROKERS)
                                 foreign_net_val = foreign_val - retail_val
@@ -206,7 +232,7 @@ class BrokerFlowFetcher:
                                 total_volume=total_vol,
                                 top_buyers=top_buyers,
                                 top_sellers=top_sellers,
-                                foreign_net_buy=foreign_net_val,
+                                foreign_net_buy=foreign_net_val if foreign_net_val is not None else 0.0,
                             )
         except Exception as e:
             logger.warning(f"Direct IDX broker summary failed for {clean_symbol} on {date_str}: {e}")
@@ -219,7 +245,7 @@ class BrokerFlowFetcher:
                 total_volume=stock_info["volume"],
                 top_buyers=[],
                 top_sellers=[],
-                foreign_net_buy=foreign_net_val,
+                foreign_net_buy=foreign_net_val if foreign_net_val is not None else 0.0,
             )
 
         return None
@@ -246,16 +272,21 @@ class BrokerFlowFetcher:
         # 1. Attempt primary effective date
         summary = self._query_idx_endpoint(clean_symbol, effective_date)
 
-        # 2. If primary was today and returned empty/failed, attempt fallback to D-1
-        now_wib = self.calendar.get_current_time()
-        today_str = now_wib.strftime("%Y%m%d")
-        if summary is None and effective_date == today_str:
-            prev_trading_str = self.calendar.get_previous_trading_day(now_wib).strftime("%Y%m%d")
-            logger.debug(f"Broker data for {clean_symbol} on {today_str} not available; falling back to D-1 ({prev_trading_str})")
-            summary = self._query_idx_endpoint(clean_symbol, prev_trading_str)
-            if summary is not None:
-                self._broker_cache[cache_key] = summary
-                return summary
+        # 2. If primary returned empty/failed, attempt fallback to D-1 of effective_date
+        if summary is None:
+            try:
+                eff_dt = datetime.strptime(effective_date, "%Y%m%d")
+                prev_trading_str = self.calendar.get_previous_trading_day(eff_dt).strftime("%Y%m%d")
+                logger.debug(
+                    f"Broker data for {clean_symbol} on {effective_date} not available; "
+                    f"falling back to D-1 ({prev_trading_str})"
+                )
+                summary = self._query_idx_endpoint(clean_symbol, prev_trading_str)
+                if summary is not None:
+                    self._broker_cache[cache_key] = summary
+                    return summary
+            except Exception as e:
+                logger.warning(f"Error resolving D-1 fallback for {clean_symbol} ({effective_date}): {e}")
 
         # 3. If still no data available, return transparent DATA_N/A baseline
         if summary is None:
