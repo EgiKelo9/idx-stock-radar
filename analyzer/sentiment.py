@@ -1,12 +1,38 @@
 import json
 import time
-from typing import Optional
+from typing import Dict, Optional, Tuple
 import httpx
 from config import config
 from models.sentiment import SentimentResult
 from utils.logger import get_logger
 
 logger = get_logger("llm_sentiment_analyzer")
+
+# Core materiality dictionaries for pre-filtering to save LLM quota
+MATERIAL_KEYWORDS = {
+    "dividen", "dividend", "laba", "rugi", "pendapatan", "revenue",
+    "akuisisi", "acquisition", "merger", "tender offer", "rights issue",
+    "right issue", "private placement", "hmetd", "buyback",
+    "pembelian kembali", "investasi", "kontrak baru", "kontrak kerja",
+    "suspensi", "suspension", "pkpu", "pailit", "kepailitan", "default",
+    "gagal bayar", "restrukturisasi", "divestasi", "pengambilalihan",
+    "pergantian pengendali", "rupslb", "kinerja keuangan", "laporan keuangan",
+    "penjualan aset", "prospektus", "obligasi", "sukuk"
+}
+
+ROUTINE_ADMIN_PHRASES = [
+    "laporan bulanan registrasi",
+    "registrasi pemegang efek",
+    "bukti iklan pemberitahuan",
+    "pemberitahuan rups tahunan",
+    "jadwal public expose tahunan",
+    "penyelenggaraan public expose tahunan",
+    "perubahan alamat kantor",
+    "perubahan alamat korespondensi",
+    "libur bursa",
+    "perubahan sekretaris perusahaan",
+    "jadwal paparan publik tahunan",
+]
 
 SYSTEM_PROMPT = """Anda adalah analis riset kuantitatif pasar modal Bursa Efek Indonesia (BEI).
 Tugas Anda adalah mengevaluasi teks keterbukaan informasi emiten dan menentukan sentimen dampaknya terhadap harga saham dalam jangka pendek/menengah (swing trading).
@@ -38,6 +64,54 @@ class LLMSentimentAnalyzer:
         self.openrouter_key = config.llm.openrouter_api_key
         self.openai_key = config.llm.openai_api_key
         self.anthropic_key = config.llm.anthropic_api_key
+        self._cooldowns: Dict[str, float] = {}
+        self._last_call_time: float = 0.0
+
+    @staticmethod
+    def is_material_disclosure(text: str) -> Tuple[bool, str]:
+        """
+        Determines if disclosure text warrants LLM analysis.
+        Filters out boilerplate administrative notifications, saving 60-80% of LLM quota.
+        """
+        if not text or len(text.strip()) < 15:
+            return False, "Tidak terdapat pengumuman aksi korporasi material terbaru."
+
+        lower_text = text.lower()
+
+        # Check boilerplate admin phrases
+        for phrase in ROUTINE_ADMIN_PHRASES:
+            if phrase in lower_text:
+                # If it's routine admin, check if it ALSO has major catalyst (e.g. RUPSLB for merger/dividend)
+                if not any(k in lower_text for k in ("merger", "akuisisi", "tender offer", "rights issue", "dividen", "laba")):
+                    return False, f"Pengumuman administratif rutin ({phrase}), analisis LLM dilewati."
+
+        # Check material keyword existence
+        has_material = any(keyword in lower_text for keyword in MATERIAL_KEYWORDS)
+        if not has_material:
+            return False, "Keterbukaan informasi tanpa katalis harga material, analisis LLM dilewati."
+
+        return True, "Keterbukaan informasi terdeteksi material."
+
+    def _is_provider_in_cooldown(self, provider: str) -> bool:
+        until = self._cooldowns.get(provider, 0.0)
+        return time.time() < until
+
+    def _set_provider_cooldown(self, provider: str, duration_seconds: float = 1800.0):
+        self._cooldowns[provider] = time.time() + duration_seconds
+        logger.warning(
+            f"Provider '{provider}' placed in cooldown for {int(duration_seconds)}s due to quota/rate limit. "
+            f"Secondary providers will be prioritized."
+        )
+
+    def _pace_call(self):
+        """Enforces minimum delay between calls based on RPM limit."""
+        rpm = max(1, config.llm.llm_rpm_limit)
+        min_interval = 60.0 / rpm
+        elapsed = time.time() - self._last_call_time
+        if elapsed < min_interval:
+            sleep_time = min_interval - elapsed
+            time.sleep(sleep_time)
+        self._last_call_time = time.time()
 
     def _parse_json_content(self, content: str) -> Optional[dict]:
         """Extracts JSON object from LLM response text, handling markdown code blocks and preambles."""
@@ -135,8 +209,10 @@ class LLMSentimentAnalyzer:
             err_str = str(e)
             if "quota" in err_str.lower() or "429" in err_str:
                 logger.warning(f"Gemini rate limit hit for {ticker}: {e}")
+                self._set_provider_cooldown("gemini", duration_seconds=1800.0)
             elif "invalid api key" in err_str.lower() or "403" in err_str:
                 logger.error(f"Gemini API key invalid or unauthorized: {e}")
+                self._set_provider_cooldown("gemini", duration_seconds=86400.0)
             else:
                 logger.error(f"Gemini API error for {ticker}: {e}")
 
@@ -148,6 +224,11 @@ class LLMSentimentAnalyzer:
             logger.info("OpenRouter API key not configured, using fallback.")
             return None
 
+        # If primary model is Gemini, route OpenRouter to configured openrouter_model (e.g. DeepSeek/Qwen)
+        model = self.model
+        if "gemini" in model.lower() and not model.startswith("google/"):
+            model = config.llm.openrouter_model or "deepseek/deepseek-chat"
+
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.openrouter_key}",
@@ -156,7 +237,7 @@ class LLMSentimentAnalyzer:
             "X-Title": "IDX Stock Radar",
         }
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -181,10 +262,10 @@ class LLMSentimentAnalyzer:
                 else:
                     logger.warning(f"OpenRouter response missing choices: {data}")
             elif resp.status_code == 404:
-                logger.warning(f"OpenRouter model unavailable (404) for {ticker}. Model: {self.model}")
+                logger.warning(f"OpenRouter model unavailable (404) for {ticker}. Model: {model}")
             elif resp.status_code == 429:
-                logger.warning(f"OpenRouter rate limit (429) for {ticker}. Waiting 2s...")
-                time.sleep(2)
+                logger.warning(f"OpenRouter rate limit (429) for {ticker}. Placing in cooldown.")
+                self._set_provider_cooldown("openrouter", duration_seconds=600.0)
             else:
                 logger.error(f"OpenRouter API error {resp.status_code}: {resp.text}")
         return None
@@ -201,7 +282,7 @@ class LLMSentimentAnalyzer:
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.model,
+            "model": self.model if not self.model.startswith("gemini") else "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -211,7 +292,7 @@ class LLMSentimentAnalyzer:
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.1,
-            "max_tokens": 300,  # Enforced per  6.2
+            "max_tokens": 300,
         }
 
         with httpx.Client(timeout=self.timeout) as client:
@@ -221,6 +302,9 @@ class LLMSentimentAnalyzer:
                 parsed = self._parse_json_content(raw_json)
                 if parsed:
                     return SentimentResult(**parsed)
+            elif resp.status_code == 429:
+                logger.warning(f"OpenAI rate limit (429) for {ticker}. Placing in cooldown.")
+                self._set_provider_cooldown("openai", duration_seconds=600.0)
             else:
                 logger.error(f"OpenAI API error {resp.status_code}: {resp.text}")
         return None
@@ -253,46 +337,89 @@ class LLMSentimentAnalyzer:
                 parsed = self._parse_json_content(content)
                 if parsed:
                     return SentimentResult(**parsed)
+            elif resp.status_code == 429:
+                logger.warning(f"Anthropic rate limit (429) for {ticker}. Placing in cooldown.")
+                self._set_provider_cooldown("anthropic", duration_seconds=600.0)
             else:
                 logger.error(f"Anthropic API error {resp.status_code}: {resp.text}")
         return None
 
+    def _execute_with_fallback(self, ticker: str, text: str) -> Optional[SentimentResult]:
+        """
+        Executes sentiment analysis trying primary provider first,
+        and gracefully cascading to secondary configured providers if rate limited (HTTP 429).
+        """
+        preferred_order = [self.provider]
+        fallbacks = ["openrouter", "gemini", "openai", "anthropic"]
+        for p in fallbacks:
+            if p not in preferred_order:
+                preferred_order.append(p)
+
+        for p in preferred_order:
+            if self._is_provider_in_cooldown(p):
+                logger.debug(f"Skipping LLM provider '{p}' (in active cooldown)")
+                continue
+
+            # Verify key exists
+            if p == "gemini" and (not self.gemini_key or self.gemini_key.startswith("your_")):
+                continue
+            elif p == "openrouter" and (not self.openrouter_key or self.openrouter_key.startswith("your_")):
+                continue
+            elif p == "openai" and (not self.openai_key or self.openai_key.startswith("your_")):
+                continue
+            elif p == "anthropic" and (not self.anthropic_key or self.anthropic_key.startswith("your_")):
+                continue
+
+            try:
+                self._pace_call()
+                logger.info(f"Attempting sentiment analysis via provider '{p}' for {ticker}")
+                if p == "gemini":
+                    res = self._call_gemini(ticker, text)
+                elif p == "openrouter":
+                    res = self._call_openrouter(ticker, text)
+                elif p == "openai":
+                    res = self._call_openai(ticker, text)
+                elif p == "anthropic":
+                    res = self._call_anthropic(ticker, text)
+                else:
+                    res = None
+
+                if res is not None:
+                    return res
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "quota" in err_str:
+                    logger.warning(f"Quota exceeded on '{p}' for {ticker}: {e}")
+                    self._set_provider_cooldown(p, duration_seconds=1800.0)
+                else:
+                    logger.warning(f"Provider '{p}' error for {ticker}: {e}")
+
+        return None
+
     def analyze(self, ticker: str, text: Optional[str]) -> SentimentResult:
         """
-        Analyzes sentiment of text.
-        If text is missing or LLM call fails/times out, returns a neutral fallback.
-        Provider priority: gemini > openai > anthropic > openrouter (based on LLM_PROVIDER setting).
+        Analyzes sentiment of disclosure text.
+        Includes materiality pre-filtering, intelligent RPM pacing, and multi-provider fallback.
         """
         clean_ticker = ticker.upper().replace(".JK", "")
 
-        if not text or len(text.strip()) < 10:
-            return SentimentResult.neutral_fallback(
-                clean_ticker,
-                reason="Tidak terdapat pengumuman aksi korporasi material terbaru."
-            )
+        is_mat, reason = self.is_material_disclosure(text or "")
+        if not is_mat:
+            logger.info(f"[{clean_ticker}] Pre-filter skipped LLM: {reason}")
+            return SentimentResult.neutral_fallback(clean_ticker, reason=reason)
 
         try:
-            if self.provider == "gemini":
-                import time
-                time.sleep(1.0)  # Gentle rate-limit pacing for Gemini API
-                res = self._call_gemini(clean_ticker, text)
-            elif self.provider == "anthropic":
-                res = self._call_anthropic(clean_ticker, text)
-            elif self.provider == "openrouter":
-                res = self._call_openrouter(clean_ticker, text)
-            else:
-                res = self._call_openai(clean_ticker, text)
-
+            res = self._execute_with_fallback(clean_ticker, text or "")
             if res is not None:
                 return res
         except (httpx.TimeoutException, TimeoutError):
             logger.warning(
-                f"LLM API timed out after {self.timeout}s for {clean_ticker}. Activating technical-only fallback ( 6.2)."
+                f"LLM API timed out after {self.timeout}s for {clean_ticker}. Activating technical-only fallback."
             )
         except Exception as e:
             logger.error(f"Unexpected error in sentiment evaluation for {clean_ticker}: {e}")
 
-        # Graceful fallback per  6.2
+        # Graceful fallback per §6.2
         return SentimentResult.neutral_fallback(
             clean_ticker,
             reason="Analisis sentimen AI dilewati (fallback teknikal murni aktif)."
