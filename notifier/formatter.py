@@ -78,6 +78,8 @@ def format_signal_message(
         f"  *Target 1:* Rp{p.take_profit_1:,.0f}  (RRR 1:{p.rrr:.1f})\n"
         f"  *Target 2:* Rp{p.take_profit_2:,.0f}\n\n"
         f"{metrics_header}\n"
+        f"  *Confidence Score:* {signal.confidence_score:.0f}/100\n"
+        f"  *Market Regime:* {escape_markdown(signal.market_regime)}\n"
         f"  *RSI (14):* {m.rsi:.1f}\n"
         f"  *{vol_label}:* {m.volume_multiplier:.1f}x\n"
         f"  *Foreign Flow:* {foreign_flow_display}\n"

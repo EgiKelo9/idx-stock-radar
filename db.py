@@ -83,6 +83,8 @@ class DatabaseManager:
                 try:
                     cur.execute("ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS scan_context VARCHAR(20) DEFAULT 'MID_DAY';")
                     cur.execute("ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS scan_date VARCHAR(20);")
+                    cur.execute("ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS confidence_score NUMERIC(5, 2) DEFAULT 0.0;")
+                    cur.execute("ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS market_regime VARCHAR(20) DEFAULT 'NORMAL';")
                 except Exception:
                     pass
                 # Attempt to create Timescale hypertable
@@ -100,10 +102,11 @@ class DatabaseManager:
                 conn.close()
             return False
 
-    def log_signal(self, signal: SignalPayload, sentiment_score: Optional[float] = None) -> bool:
+    def log_signal(self, signal: SignalPayload, sentiment_score: Optional[float] = None, status: str = "SENT") -> bool:
         """
         Records signal to signal_logs table, or appends to local buffer if DB is down (§6.2).
         """
+        signal_status = status or getattr(signal, "status", "SENT")
         conn = self._get_connection()
         if conn is not None:
             try:
@@ -114,8 +117,11 @@ class DatabaseManager:
                             id, symbol, entry_price, stop_loss,
                             take_profit_1, take_profit_2, risk_reward_ratio,
                             volume_ratio, sentiment_score, sentiment_summary, execution_status,
-                            scan_context, scan_date
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            scan_context, scan_date, confidence_score, market_regime
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO UPDATE SET
+                            execution_status = EXCLUDED.execution_status,
+                            confidence_score = EXCLUDED.confidence_score
                         """,
                         (
                             signal.signal_id,
@@ -128,9 +134,11 @@ class DatabaseManager:
                             signal.metrics.volume_multiplier,
                             sentiment_score,
                             signal.ai_context,
-                            "SENT",
+                            signal_status,
                             getattr(signal, "scan_context", "MID_DAY"),
                             getattr(signal, "scan_date", ""),
+                            getattr(signal, "confidence_score", 0.0),
+                            getattr(signal, "market_regime", "NORMAL"),
                         ),
                     )
                 conn.commit()

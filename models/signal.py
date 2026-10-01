@@ -41,3 +41,6 @@ class SignalPayload(BaseModel):
     ai_context: str = Field(..., description="AI sentiment analysis summary or reason")
     scan_context: str = Field(default="MID_DAY", description="Scan context: PRE_MARKET, MID_DAY, or END_MARKET")
     scan_date: str = Field(default="", description="Execution date YYYY-MM-DD")
+    confidence_score: float = Field(default=0.0, description="Composite score 0-100 based on technical, flow, sentiment, and risk")
+    market_regime: str = Field(default="NORMAL", description="Market regime context: BULLISH, BEARISH, SIDEWAYS, VOLATILE, NORMAL")
+    status: str = Field(default="PENDING", description="Signal lifecycle status: PENDING, SENT, FAILED")

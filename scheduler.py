@@ -7,6 +7,7 @@ from db import DatabaseManager
 from fetcher.ticker_list import TickerListFetcher
 from models.scan_context import ScanContext
 from pipeline import SignalPipeline
+from screener.market_regime import MarketRegimeDetector
 from utils.logger import get_logger
 from utils.market_calendar import MarketCalendar
 
@@ -19,12 +20,20 @@ class StockRadarScheduler:
         self.ticker_fetcher = TickerListFetcher()
         self.pipeline = SignalPipeline()
         self.db = DatabaseManager()
+        self.regime_detector = MarketRegimeDetector()
         self.scheduler = BlockingScheduler(timezone=config.system.timezone)
 
     def startup(self):
         """Initializes database schema and prepares state."""
         logger.info("Initializing IDX Stock Radar System...")
         self.db.initialize_schema()
+        # Pre-warm and refresh ticker list universe on startup
+        try:
+            tickers = self.ticker_fetcher.fetch_listed_tickers(force_refresh=True)
+            logger.info(f"Startup ticker universe initialized: {len(tickers)} tickers loaded.")
+        except Exception as e:
+            logger.warning(f"Startup ticker fetch failed, will rely on cached/fallback data: {e}")
+
         logger.info(
             f"Configured 3 Swing Trading Schedules: "
             f"Pre-Market {config.system.pre_market_hour:02d}:{config.system.pre_market_minute:02d}, "
@@ -40,10 +49,13 @@ class StockRadarScheduler:
     ):
         """
         Executes one full market scan across the active ticker universe for a specific context.
+        Implements full 25-stage architectural flow with regime detection and global ranking.
         """
+        # Stage 1: Scheduled scan context trigger
         active_context = context or ScanContext.MID_DAY
         now = self.calendar.get_current_time()
 
+        # Stage 2: Trading Day Gate
         if not force_run and not self.calendar.is_trading_day(now):
             logger.info(
                 f"Today ({now.strftime('%Y-%m-%d')}) is not an IDX trading day (Weekend/Holiday). "
@@ -55,19 +67,36 @@ class StockRadarScheduler:
             f"Starting {active_context.value} market scan cycle at {now.strftime('%Y-%m-%d %H:%M:%S %Z')} "
             f"[{active_context.title_label}]"
         )
+
+        # Stage 3: Market Regime Detection (IHSG Macro Condition)
+        regime_res = self.regime_detector.detect_regime()
+        self.pipeline.active_regime = regime_res.regime
+        logger.info(f"Active Market Regime: {regime_res.regime} (IHSG: {regime_res.ihsg_price:.1f})")
+
+        # Stage 4: Fetch Tickers
         tickers = self.ticker_fetcher.fetch_listed_tickers()
         logger.info(f"Loaded {len(tickers)} candidates for {active_context.value} screening.")
 
-        signals_generated = 0
+        # Stages 5 - 18: Candidate Evaluation & Collection
+        candidates = []
         for ticker in tickers:
             try:
                 sig = self.pipeline.process_ticker(ticker, context=active_context)
                 if sig is not None:
-                    signals_generated += 1
+                    candidates.append(sig)
             except Exception as e:
                 logger.error(f"Error processing {ticker.symbol}: {e}")
 
-        logger.info(f"{active_context.value} scan cycle finished. Signals dispatched: {signals_generated}")
+        # Stages 19 - 25: Global Ranking, Deduplication, Top-N Selection, and Dispatch
+        dispatched_signals = self.pipeline.rank_and_dispatch(
+            candidates=candidates,
+            context=active_context,
+            top_n=5,
+        )
+        logger.info(
+            f"{active_context.value} scan cycle finished. Signals dispatched: {len(dispatched_signals)} "
+            f"(from {len(candidates)} qualified candidates)"
+        )
 
     def start(self):
         """Starts the blocking scheduled job loop with 3 fixed swing trading cron triggers."""
